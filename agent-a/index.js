@@ -1,107 +1,240 @@
 import { v4 as uuidv4 } from 'uuid';
 import { A2AClient, A2ACardResolver, Role } from "a2a-js";
 
-async function run() {
-  const targetUrl = "http://localhost:3001"; // Agent B
-  
-  console.log("🔍 A2A Protocol Communication Test");
-  console.log("=" .repeat(60));
-  
-  // 🔍 Discovery using A2ACardResolver (A2A Protocol Step 1)
-  console.log("\n📋 Step 1: Agent Discovery (/.well-known/agent.json)");
-  const resolver = new A2ACardResolver(targetUrl);
-  const agentCard = await resolver.getAgentCard();
-  console.log("✅ Discovered Agent:", agentCard.name);
-  console.log("   Description:", agentCard.description);
-  console.log("   URL:", agentCard.url);
-  console.log("   Version:", agentCard.version);
-  if (agentCard.skills) {
-    console.log("   Skills:", agentCard.skills.map(s => s.name).join(', '));
-  }
+/**
+ * Agent 1: Customer-Facing Agent
+ * 
+ * This agent has NO tools and serves as a customer interface.
+ * It requests product inventory information from Agent 2 via A2A Protocol.
+ * 
+ * A2A Protocol Flow:
+ * 1. Discovers Agent 2 via /.well-known/agent.json
+ * 2. Sends task using tasks/send (JSON-RPC 2.0)
+ * 3. Receives task response with artifacts containing product data
+ * 4. Extracts and displays product information to customer
+ */
 
-  // Create A2A client (constructor takes URL string, not object)
-  console.log("\n📡 Step 2: Creating A2A Client");
-  const client = new A2AClient(targetUrl, fetch);
-  console.log("✅ A2A Client initialized with base URL:", targetUrl);
+// Configuration
+const AGENT_B_URL = "http://localhost:3001"; // Agent 2 (Product Service)
+const SESSION_ID = 'product-inquiry-session';
 
-  // 📨 Send task using sendTask() with proper TaskSendParams structure
-  // (A2A Protocol: tasks/send JSON-RPC method)
-  console.log("\n📤 Step 3: Sending Task (tasks/send)");
-  const taskId = uuidv4();
-  console.log("   Task ID:", taskId);
-  console.log("   Method: tasks/send (JSON-RPC 2.0)");
-  console.log("   Message Role:", Role.User);
-  
-  const task = await client.sendTask({
-    id: taskId,
-    message: {
-      role: Role.User,
-      parts: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            type: "greeting",
-            input: { name: "Bhanu" }
-          })
-        }
-      ]
-    }
-  });
-
-  if (!task) {
-    console.error("❌ Failed to create task");
-    return;
-  }
-
-  console.log("✅ Task received from Agent B");
-  console.log("   Task ID:", task.id);
-  console.log("   Task State:", task.status?.state);
-  console.log("   Protocol: A2A Task object with status field");
-  
-  if (task.status?.message) {
-    const msg = task.status.message;
-    console.log("   Response Role:", msg.role);
-    console.log("   Response Parts:", msg.parts?.length || 0);
-  }
-
-  // ⏳ Get result using getTask() (A2A Protocol: tasks/get JSON-RPC method)
-  console.log("\n📥 Step 4: Retrieving Task (tasks/get)");
-  console.log("   Method: tasks/get (JSON-RPC 2.0)");
-  console.log("   Task ID:", task.id);
-  
-  const result = await client.getTask({ id: task.id });
-  
-  if (result) {
-    console.log("✅ Task retrieved successfully");
-    console.log("   Protocol: A2A Task retrieval via tasks/get");
-    
-    // Extract the response message from the task status
-    const responseMessage = result.status?.message;
-    if (responseMessage && responseMessage.parts) {
-      const textParts = responseMessage.parts
-        .filter(part => part.type === 'text')
-        .map(part => part.text)
-        .join('');
-      console.log("\n💬 Response from Agent B:");
-      console.log("   " + textParts);
-    } else {
-      console.log("   Full Task Object:", JSON.stringify(result, null, 2));
-    }
-  } else {
-    console.error("❌ Failed to retrieve task result");
-  }
-  
-  console.log("\n" + "=".repeat(60));
-  console.log("✅ A2A Protocol Communication Verified!");
-  console.log("\nProtocol Elements Used:");
-  console.log("  ✓ Agent Discovery (/.well-known/agent.json)");
-  console.log("  ✓ JSON-RPC 2.0 (jsonrpc: '2.0')");
-  console.log("  ✓ tasks/send method");
-  console.log("  ✓ tasks/get method");
-  console.log("  ✓ Task object with id, status, message");
-  console.log("  ✓ Message with role (User/Agent) and parts");
-  console.log("  ✓ Part with type='text' and text content");
-  console.log();
+/**
+ * Extract text from A2A message parts
+ */
+function extractMessageText(message) {
+  if (!message || !message.parts) return '';
+  return message.parts
+    .filter(part => part.type === 'text')
+    .map(part => part.text)
+    .join('');
 }
 
-run().catch(console.error);
+/**
+ * Extract structured data from A2A message parts
+ * Looks for DataPart (type: 'data') which contains JSON data
+ */
+function extractDataFromMessage(message) {
+  if (!message || !message.parts) return null;
+  
+  const dataPart = message.parts.find(part => part.type === 'data');
+  return dataPart ? dataPart.data : null;
+}
+
+/**
+ * Extract artifacts from task response
+ * Artifacts contain structured outputs from Agent 2 (like product inventory)
+ */
+function extractArtifacts(task) {
+  if (!task || !task.artifacts || !Array.isArray(task.artifacts)) {
+    return [];
+  }
+  
+  return task.artifacts.map(artifact => {
+    // Extract data from artifact parts
+    const dataParts = artifact.parts.filter(part => part.type === 'data');
+    return {
+      name: artifact.name,
+      description: artifact.description,
+      data: dataParts.map(part => part.data)
+    };
+  });
+}
+
+/**
+ * Format product data for display
+ * Handles normalized product format from Agent 2
+ */
+function formatProductsForDisplay(products) {
+  if (!products || !Array.isArray(products)) {
+    return "No products found";
+  }
+  
+  return products.map((product, index) => {
+    const priceStr = product.currency 
+      ? `${product.currency} ${product.price}` 
+      : `$${product.price || 'N/A'}`;
+    
+    const stockStatus = product.inStock 
+      ? `✅ In Stock (${product.quantity} available)` 
+      : '❌ Out of Stock';
+    
+    return `\n${index + 1}. ${product.name || 'Unnamed Product'}\n   SKU: ${product.sku || 'N/A'}\n   Price: ${priceStr}\n   Status: ${stockStatus}\n   ${product.category ? `Category: ${product.category}` : ''}\n   ${product.vendor ? `Vendor: ${product.vendor}` : ''}`;
+  }).join('\n');
+}
+
+/**
+ * Main function: Request products from Agent 2
+ */
+async function requestProducts() {
+  console.log("🛒 Agent 1: Customer-Facing Agent");
+  console.log("=" .repeat(60));
+  console.log("📋 Purpose: Request product inventory from Agent 2");
+  console.log("🔧 Tools: None (customer-facing only)");
+  console.log();
+  
+  try {
+    // Step 1: Discover Agent 2 using A2A Protocol
+    // This is the standard A2A discovery mechanism
+    console.log("📡 Step 1: Discovering Agent 2 (A2A Protocol)");
+    console.log(`   GET ${AGENT_B_URL}/.well-known/agent.json`);
+    
+    const resolver = new A2ACardResolver(AGENT_B_URL);
+    const agentCard = await resolver.getAgentCard();
+    
+    console.log("✅ Agent 2 Discovered:");
+    console.log(`   Name: ${agentCard.name}`);
+    console.log(`   Description: ${agentCard.description}`);
+    if (agentCard.skills && agentCard.skills.length > 0) {
+      console.log(`   Available Skills: ${agentCard.skills.map(s => s.name).join(', ')}`);
+    }
+    console.log();
+    
+    // Step 2: Create A2A Client
+    // The client handles all JSON-RPC 2.0 communication with Agent 2
+    console.log("📡 Step 2: Creating A2A Client");
+    console.log("   The client will handle JSON-RPC 2.0 protocol");
+    
+    const client = new A2AClient(AGENT_B_URL, fetch);
+    console.log("✅ A2A Client initialized");
+    console.log();
+    
+    // Step 3: Send product request via A2A Protocol
+    // Using tasks/send method (JSON-RPC 2.0)
+    console.log("📤 Step 3: Sending Product Request (A2A Protocol)");
+    console.log("   Method: tasks/send (JSON-RPC 2.0)");
+    console.log("   Request: Get all products from inventory");
+    
+    const taskId = uuidv4();
+    
+    // Send task with product request
+    // The message can be text or structured data (DataPart)
+    const task = await client.sendTask({
+      id: taskId,
+      sessionId: SESSION_ID,
+      message: {
+        role: Role.User,  // Agent 1 is the user/client in this transaction
+        parts: [
+          {
+            type: 'text',
+            text: 'Get all products from inventory'
+          }
+          // Alternative: Could use structured data:
+          // {
+          //   type: 'data',
+          //   data: {
+          //     action: 'get_products',
+          //     filters: { category: 'all' }
+          //   }
+          // }
+        ]
+      }
+    });
+    
+    if (!task) {
+      console.error("❌ Failed to receive task response");
+      return;
+    }
+    
+    console.log("✅ Task Response Received");
+    console.log(`   Task ID: ${task.id}`);
+    console.log(`   Task State: ${task.status?.state}`);
+    console.log();
+    
+    // Step 4: Extract product data from response
+    // Agent 2 should return products in artifacts (structured outputs)
+    console.log("📥 Step 4: Extracting Product Data");
+    
+    // Check for artifacts first (structured tool outputs)
+    const artifacts = extractArtifacts(task);
+    
+    if (artifacts.length > 0) {
+      console.log(`✅ Found ${artifacts.length} artifact(s)`);
+      
+      // Extract product data from artifacts
+      for (const artifact of artifacts) {
+        console.log(`   Artifact: ${artifact.name || 'Unnamed'}`);
+        if (artifact.description) {
+          console.log(`   Description: ${artifact.description}`);
+        }
+        
+        // Artifact data contains the actual product inventory
+        for (const data of artifact.data) {
+          if (data.products && Array.isArray(data.products)) {
+            // Display shop metadata if available
+            if (data.metadata) {
+              console.log(`\n🏪 Shop: ${data.metadata.shop || 'Unknown'}`);
+              console.log(`   Currency: ${data.metadata.currency || 'USD'}`);
+              console.log(`   Total Products: ${data.metadata.total || data.products.length}`);
+              if (data.metadata.lastSync) {
+                console.log(`   Last Sync: ${data.metadata.lastSync}`);
+              }
+            }
+            
+            console.log(`\n📦 Products Received: ${data.products.length} items`);
+            console.log(formatProductsForDisplay(data.products));
+          } else if (data) {
+            console.log("   Data:", JSON.stringify(data, null, 2));
+          }
+        }
+      }
+    } else {
+      // Fallback: Check message for text response
+      const responseMessage = task.status?.message;
+      if (responseMessage) {
+        const responseText = extractMessageText(responseMessage);
+        console.log("📝 Response Message:");
+        console.log(responseText);
+        
+        // Also check for data in message parts
+        const messageData = extractDataFromMessage(responseMessage);
+        if (messageData && messageData.products) {
+          console.log("\n📦 Products in Message:");
+          console.log(formatProductsForDisplay(messageData.products));
+        }
+      } else {
+        console.log("⚠️  No artifacts or message found in response");
+        console.log("   Full Task:", JSON.stringify(task, null, 2));
+      }
+    }
+    
+    console.log("\n" + "=".repeat(60));
+    console.log("✅ A2A Transaction Complete!");
+    console.log("\n📊 Summary:");
+    console.log("  ✓ Agent discovery via /.well-known/agent.json");
+    console.log("  ✓ Product request sent via tasks/send");
+    console.log("  ✓ Product data received via artifacts");
+    console.log("  ✓ All communication via A2A Protocol (JSON-RPC 2.0)");
+    console.log();
+    
+  } catch (error) {
+    console.error("\n❌ Error in A2A transaction:", error.message);
+    console.error(error);
+    process.exit(1);
+  }
+}
+
+// Run the product request
+requestProducts().catch(error => {
+  console.error("\n❌ Fatal error:", error);
+  process.exit(1);
+});
